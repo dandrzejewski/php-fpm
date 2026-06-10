@@ -1,0 +1,23 @@
+{
+    "name": "homelab/otel-bootstrap",
+    "description": "OpenTelemetry SDK + auto-instrumentation, installed to /opt/otel (OUTSIDE the WordPress webroot) so the Kubernetes PVC mounted over the docroot cannot mask it. Loaded at request time via auto_prepend_file in a conf.d drop-in.",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "open-telemetry/sdk": "^1.0",
+        "open-telemetry/exporter-otlp": "^1.0",
+        "open-telemetry/opentelemetry-auto-wordpress": "*",
+        "open-telemetry/opentelemetry-auto-pdo": "*",
+        "open-telemetry/opentelemetry-auto-mysqli": "*",
+        "guzzlehttp/guzzle": "^7.0",
+        "nyholm/psr7": "^1.0"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

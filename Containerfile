@@ -83,6 +83,11 @@ RUN set -eux; \
 # disappear at runtime).
 COPY otel/composer.json /opt/otel/composer.json
 
+# auto_prepend chain bootstrap (loads the OTel SDK, then chains Wordfence's WAF).
+# The cluster points php_admin_value[auto_prepend_file] at this so it wins over
+# Wordfence's webroot .user.ini. Also under /opt so the PVC cannot mask it.
+COPY otel/otel-prepend.php /opt/otel/otel-prepend.php
+
 # One ephemeral layer: pull build toolchain (php-dev + compiler), build the two
 # PECL extensions, enable them the Ubuntu-native way (mods-available + phpenmod
 # so the symlinks land in conf.d, which survives the runtime mounts), composer
@@ -122,10 +127,14 @@ RUN set -eux; \
     \
     # Activation drop-in the IMAGE owns. At runtime the cluster mounts its own
     # php.ini/php-fpm.conf/pool.d over ours via subPath, but conf.d is not
-    # mounted — so this survives. php.ini is parsed first (auto_prepend_file
-    # left empty there), conf.d after; the "zz-" prefix sorts last in conf.d, so
-    # this wins over anything else that might set auto_prepend_file.
-    printf '; Load the OpenTelemetry SDK + auto-instrumentation on every request.\n; /opt is outside the webroot, so the PVC mount cannot hide it.\nauto_prepend_file=/opt/otel/vendor/autoload.php\n' \
+    # mounted — so this survives. This is a DEFAULT only: conf.d is overridden by
+    # a webroot .user.ini (PHP_INI_PERDIR beats conf.d), which is exactly how
+    # Wordfence steals the slot. The AUTHORITATIVE setting is the cluster's
+    # php_admin_value[auto_prepend_file] in the php-fpm pool (PHP_INI_SYSTEM —
+    # .user.ini cannot override it), also pointed at otel-prepend.php. We target
+    # the CHAIN bootstrap (not vendor/autoload.php directly) so Wordfence's WAF
+    # still loads after the SDK — see otel/otel-prepend.php.
+    printf '; Default activation: load the OTel SDK + chain Wordfence on each web\n; request. Authoritative slot is php_admin_value in the pool (see www.conf).\n; /opt is outside the webroot, so the PVC mount cannot hide it.\nauto_prepend_file=/opt/otel/otel-prepend.php\n' \
         > /etc/php/8.3/fpm/conf.d/zz-otel.ini; \
     \
     # Drop the build toolchain (NOT composer) and caches from this layer.

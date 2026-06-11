@@ -9,7 +9,7 @@
         "open-telemetry/opentelemetry-auto-wordpress": "*",
         "open-telemetry/opentelemetry-auto-pdo": "*",
         "open-telemetry/opentelemetry-auto-mysqli": "*",
-        "guzzlehttp/guzzle": "^7.0",
+        "php-http/curl-client": "^2.0",
         "nyholm/psr7": "^1.0"
     },
     "config": {

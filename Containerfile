@@ -88,6 +88,12 @@ COPY otel/composer.json /opt/otel/composer.json
 # Wordfence's webroot .user.ini. Also under /opt so the PVC cannot mask it.
 COPY otel/otel-prepend.php /opt/otel/otel-prepend.php
 
+# Build-time patch for an auto-mysqli 0.4.0 type bug (mysqli_connect port arg
+# `false` vs ?int -> a PHP Warning per request). Applied after composer install
+# below. See otel/patch-mysqli.php for the rationale + the build-fails-loudly
+# assertion that guards against silent drift on an upstream version bump.
+COPY otel/patch-mysqli.php /opt/otel/patch-mysqli.php
+
 # One ephemeral layer: pull build toolchain (php-dev + compiler), build the two
 # PECL extensions, enable them the Ubuntu-native way (mods-available + phpenmod
 # so the symlinks land in conf.d, which survives the runtime mounts), composer
@@ -124,6 +130,11 @@ RUN set -eux; \
     # cli running composer already loads it.
     composer update --no-dev --no-interaction --no-progress --prefer-dist \
         --optimize-autoloader --working-dir=/opt/otel; \
+    \
+    # Patch the auto-mysqli port-type bug (see otel/patch-mysqli.php). Runs after
+    # install so it edits the resolved vendor tree; fails the build if the target
+    # line is gone (upstream changed) instead of silently shipping unpatched.
+    php /opt/otel/patch-mysqli.php; \
     \
     # Activation drop-in the IMAGE owns. At runtime the cluster mounts its own
     # php.ini/php-fpm.conf/pool.d over ours via subPath, but conf.d is not

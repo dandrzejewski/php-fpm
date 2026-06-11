@@ -88,6 +88,11 @@ COPY otel/composer.json /opt/otel/composer.json
 # Wordfence's webroot .user.ini. Also under /opt so the PVC cannot mask it.
 COPY otel/otel-prepend.php /opt/otel/otel-prepend.php
 
+# Per-request continuous profiler (excimer -> Pyroscope). Required first by
+# otel-prepend.php. Inert unless PYROSCOPE_ENABLED=true. Dependency-free push
+# (no guzzle) — see otel/profiler.php.
+COPY otel/profiler.php /opt/otel/profiler.php
+
 # Build-time patch for an auto-mysqli 0.4.0 type bug (mysqli_connect port arg
 # `false` vs ?int -> a PHP Warning per request). Applied after composer install
 # below. See otel/patch-mysqli.php for the rationale + the build-fails-loudly

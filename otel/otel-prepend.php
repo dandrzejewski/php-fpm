@@ -26,6 +26,14 @@
  * the CLI. wp-cli/cron is unaffected (and was never WAF-prepended either).
  */
 
+// 0) Continuous profiler FIRST — start the excimer sampler before any app code
+//    so it captures the full request (incl. the plugin/theme/core PHP that runs
+//    before WordPress's main query). Self-gated by PYROSCOPE_ENABLED; inert and
+//    dependency-free otherwise. Never fatal.
+if ( is_readable( '/opt/otel/profiler.php' ) ) {
+	require_once '/opt/otel/profiler.php';
+}
+
 // 1) OpenTelemetry SDK + auto-instrumentation. Wrapped so a runtime exception in
 //    SDK init can never bubble into the request. (A compile-time fatal such as a
 //    class redeclaration is NOT catchable here — that class of failure is

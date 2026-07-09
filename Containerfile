@@ -1,15 +1,18 @@
-# PHP 8.3-FPM image for the WordPress/CRM stack, served over FastCGI :9000
+# PHP 8.5-FPM image for the WordPress/CRM stack, served over FastCGI :9000
 # behind nginx and run rootless on the Talos cluster.
 #
-# Base pinned by digest for reproducibility (tag 24.04 moves). Re-resolve with:
-#   docker buildx imagetools inspect ubuntu:24.04
-FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
+# Base pinned by digest for reproducibility (tag 26.04 moves). Re-resolve with:
+#   docker buildx imagetools inspect ubuntu:26.04
+FROM ubuntu:26.04@sha256:b7f48194d4d8b763a478a621cdc81c27be222ba2206ca3ca6bc42b49685f3d9e
 
 LABEL org.opencontainers.image.source="https://github.com/dandrzejewski/php-fpm" \
-      org.opencontainers.image.description="PHP 8.3-FPM + WP-CLI for the WordPress/CRM stack"
+      org.opencontainers.image.description="PHP 8.5-FPM + WP-CLI for the WordPress/CRM stack"
 
 # wp-cli release to install (verified against its published sha512 below).
 ARG WPCLI_VERSION=2.12.0
+
+# cv (CiviCRM CLI) release to install (verified against its published SHA256 below).
+ARG CV_VERSION=0.3.71
 
 # OpenTelemetry PHP extensions, built from PECL (Ubuntu does not package them).
 # Pinned to current stable; protobuf gives fast OTLP serialization. We export
@@ -29,7 +32,7 @@ RUN set -eux; \
     apt-get -y dist-upgrade; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl \
-        php8.3-fpm php8.3-cli \
+        php8.5-fpm php8.5-cli \
         php-apcu php-bcmath php-bz2 php-common php-composer-ca-bundle \
         php-composer-metadata-minifier php-composer-pcre php-composer-semver \
         php-composer-spdx-licenses php-curl php-excimer php-gd \
@@ -57,6 +60,18 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/wp; \
     rm -f /tmp/wp.sha512; \
     \
+    # cv: CiviCRM CLI. Pin to a tagged GitHub release + verify its published
+    # SHA256 before trusting it — same pattern as wp-cli above. (The canonical
+    # download.civicrm.org/cv/cv.phar is a rolling build with no checksum, so we
+    # pull the versioned release asset instead. -L follows GitHub's 302.)
+    curl -fsSL -o /usr/local/bin/cv \
+        "https://github.com/civicrm/cv/releases/download/v${CV_VERSION}/cv-${CV_VERSION}.phar"; \
+    curl -fsSL -o /tmp/cv.SHA256SUMS \
+        "https://github.com/civicrm/cv/releases/download/v${CV_VERSION}/cv-${CV_VERSION}.SHA256SUMS"; \
+    echo "$(awk '{print $1}' /tmp/cv.SHA256SUMS)  /usr/local/bin/cv" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/cv; \
+    rm -f /tmp/cv.SHA256SUMS; \
+    \
     # Strip build-only tooling + apt metadata to shrink the image.
     apt-get purge -y --auto-remove curl; \
     rm -rf /var/lib/apt/lists/*
@@ -66,10 +81,10 @@ RUN set -eux; \
 # user/group directives are intentionally left default — php-fpm ignores them
 # when the master is not root (see USER below).
 RUN set -eux; \
-    sed -ri 's#^;?listen = .*#listen = 9000#' /etc/php/8.3/fpm/pool.d/www.conf; \
-    sed -ri 's#^;?catch_workers_output = .*#catch_workers_output = yes#' /etc/php/8.3/fpm/pool.d/www.conf; \
-    sed -ri 's#^;?error_log = .*#error_log = /proc/self/fd/2#' /etc/php/8.3/fpm/php-fpm.conf; \
-    sed -ri 's#^;?daemonize = .*#daemonize = no#' /etc/php/8.3/fpm/php-fpm.conf
+    sed -ri 's#^;?listen = .*#listen = 9000#' /etc/php/8.5/fpm/pool.d/www.conf; \
+    sed -ri 's#^;?catch_workers_output = .*#catch_workers_output = yes#' /etc/php/8.5/fpm/pool.d/www.conf; \
+    sed -ri 's#^;?error_log = .*#error_log = /proc/self/fd/2#' /etc/php/8.5/fpm/php-fpm.conf; \
+    sed -ri 's#^;?daemonize = .*#daemonize = no#' /etc/php/8.5/fpm/php-fpm.conf
 
 # --- OpenTelemetry distributed tracing --------------------------------------
 # EVERYTHING here lives OUTSIDE the WordPress webroot. At runtime the cluster
@@ -108,14 +123,14 @@ COPY otel/patch-mysqli.php /opt/otel/patch-mysqli.php
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
-    # Build-only: phpize/php-config (php8.3-dev), a C/C++ toolchain
+    # Build-only: phpize/php-config (php8.5-dev), a C/C++ toolchain
     # (build-essential — protobuf's ext is C++), autoconf + pkg-config for the
     # PECL build. composer drives the /opt/otel install. All but composer are
     # purged at the end of this same layer.
     apt-get install -y --no-install-recommends \
-        php8.3-dev build-essential autoconf pkg-config composer; \
+        php8.5-dev build-essential autoconf pkg-config composer; \
     \
-    # Build + install the extensions. pecl drops the .so into the 8.3 extension
+    # Build + install the extensions. pecl drops the .so into the 8.5 extension
     # dir but does NOT wire Debian/Ubuntu's conf.d — we do that next.
     pecl install "opentelemetry-${OTEL_EXT_VERSION}" "protobuf-${PROTOBUF_EXT_VERSION}"; \
     \
@@ -124,10 +139,10 @@ RUN set -eux; \
     # runtime, so the extensions stay loaded under the cluster's php.ini.
     # protobuf at priority 15 so it initialises before opentelemetry (20).
     printf '; priority=15\nextension=protobuf.so\n' \
-        > /etc/php/8.3/mods-available/protobuf.ini; \
+        > /etc/php/8.5/mods-available/protobuf.ini; \
     printf '; priority=20\nextension=opentelemetry.so\n' \
-        > /etc/php/8.3/mods-available/opentelemetry.ini; \
-    phpenmod -v 8.3 protobuf opentelemetry; \
+        > /etc/php/8.5/mods-available/opentelemetry.ini; \
+    phpenmod -v 8.5 protobuf opentelemetry; \
     \
     # Resolve + install the SDK into /opt/otel. --no-dev keeps it lean; the lock
     # generated here pins exact versions inside the image. Platform reqs
@@ -151,10 +166,10 @@ RUN set -eux; \
     # the CHAIN bootstrap (not vendor/autoload.php directly) so Wordfence's WAF
     # still loads after the SDK — see otel/otel-prepend.php.
     printf '; Default activation: load the OTel SDK + chain Wordfence on each web\n; request. Authoritative slot is php_admin_value in the pool (see www.conf).\n; /opt is outside the webroot, so the PVC mount cannot hide it.\nauto_prepend_file=/opt/otel/otel-prepend.php\n' \
-        > /etc/php/8.3/fpm/conf.d/zz-otel.ini; \
+        > /etc/php/8.5/fpm/conf.d/zz-otel.ini; \
     \
     # Drop the build toolchain (NOT composer) and caches from this layer.
-    apt-get purge -y --auto-remove php8.3-dev build-essential autoconf pkg-config; \
+    apt-get purge -y --auto-remove php8.5-dev build-essential autoconf pkg-config; \
     rm -rf /var/lib/apt/lists/* /tmp/pear /root/.composer /root/.cache
 
 # Run unprivileged (uid 33 ships in the base). :9000 > 1024, so non-root binds it.
@@ -168,4 +183,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000' || exit 1
 
 # -F = foreground (no pid file needed; /var/run isn't writable by www-data).
-CMD ["/usr/sbin/php-fpm8.3", "-F", "-y", "/etc/php/8.3/fpm/php-fpm.conf"]
+CMD ["/usr/sbin/php-fpm8.5", "-F", "-y", "/etc/php/8.5/fpm/php-fpm.conf"]

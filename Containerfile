@@ -3,7 +3,7 @@
 #
 # Base pinned by digest for reproducibility (tag 26.04 moves). Re-resolve with:
 #   docker buildx imagetools inspect ubuntu:26.04
-FROM ubuntu:26.04@sha256:b7f48194d4d8b763a478a621cdc81c27be222ba2206ca3ca6bc42b49685f3d9e
+FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944
 
 LABEL org.opencontainers.image.source="https://github.com/dandrzejewski/php-fpm" \
       org.opencontainers.image.description="PHP 8.5-FPM + WP-CLI for the WordPress/CRM stack"
@@ -12,13 +12,27 @@ LABEL org.opencontainers.image.source="https://github.com/dandrzejewski/php-fpm"
 ARG WPCLI_VERSION=2.12.0
 
 # cv (CiviCRM CLI) release to install (verified against its published SHA256 below).
-ARG CV_VERSION=0.3.71
+ARG CV_VERSION=0.3.72
 
 # OpenTelemetry PHP extensions, built from PECL (Ubuntu does not package them).
 # Pinned to current stable; protobuf gives fast OTLP serialization. We export
 # OTLP over http/protobuf, so grpc is intentionally NOT installed.
-ARG OTEL_EXT_VERSION=1.2.1
-ARG PROTOBUF_EXT_VERSION=5.35.0
+ARG OTEL_EXT_VERSION=1.4.2
+ARG PROTOBUF_EXT_VERSION=5.36.2
+# sha256 of https://pecl.php.net/get/<ext>-<version>.tgz for each extension.
+# Both are fetched as tarballs and verified, not resolved by pecl name: pecl's
+# REST lookup for opentelemetry is broken ("does not have REST xml available",
+# every version), and pinning both keeps their supply-chain guarantee equal.
+# PECL publishes no checksum; recompute on a version bump with:
+#   curl -fsSL https://pecl.php.net/get/<ext>-<ver>.tgz | sha256sum
+ARG OTEL_EXT_SHA256=a355329259f373c5c7327e66310481726cfabac50cb5483eba000bec791d5017
+ARG PROTOBUF_EXT_SHA256=f0a17c67de29df0fb0e5215a381df9b155125e1ace6252dd617bf16b4194dd5b
+
+# Minimum acceptable Ubuntu php8.5 package. 8.5.4-0ubuntu1.5 (USN-8948-1) fixes
+# CVE-2026-109618 + CVE-2026-109619 (PHP2Shell unauthenticated RCE). The build
+# fails below this floor, so a stale mirror can never ship a vulnerable image.
+# Raise it whenever a later USN fixes something we must not regress on.
+ARG PHP_MIN_PKG_VERSION=8.5.4-0ubuntu1.5
 
 # Single layer: install runtime deps, fetch+verify wp-cli, then strip build-only
 # tooling and apt lists. DEBIAN_FRONTEND avoids interactive prompts;
@@ -50,6 +64,14 @@ RUN set -eux; \
         php-symfony-var-exporter php-tcpdf php-twig php-twig-i18n-extension \
         php-xml php-xmlrpc php-zip php-gmp php-dom php-fileinfo php-simplexml \
         php-xmlreader php-xmlwriter php-mysqli php-exif php-ldap; \
+    \
+    # Security floor: refuse to build if apt resolved a php8.5 older than the
+    # fixed package (see PHP_MIN_PKG_VERSION above).
+    for pkg in php8.5-fpm php8.5-cli; do \
+        v="$(dpkg-query -W -f='${Version}' "$pkg")"; \
+        dpkg --compare-versions "$v" ge "${PHP_MIN_PKG_VERSION}" \
+            || { echo "ERROR: $pkg $v < ${PHP_MIN_PKG_VERSION}" >&2; exit 1; }; \
+    done; \
     \
     # wp-cli: download release phar + verify sha512 before trusting it.
     curl -fsSL -o /usr/local/bin/wp \
@@ -85,6 +107,21 @@ RUN set -eux; \
     sed -ri 's#^;?catch_workers_output = .*#catch_workers_output = yes#' /etc/php/8.5/fpm/pool.d/www.conf; \
     sed -ri 's#^;?error_log = .*#error_log = /proc/self/fd/2#' /etc/php/8.5/fpm/php-fpm.conf; \
     sed -ri 's#^;?daemonize = .*#daemonize = no#' /etc/php/8.5/fpm/php-fpm.conf
+
+# Defense-in-depth for CVE-2026-109619 (PHP2Shell): both settings feed the
+# stale-state RCE path and nothing in WordPress/CiviCRM needs them. Session
+# upload progress is on by default; fatal-error backtraces are on by default in
+# PHP 8.5. Lives in conf.d because the cluster mounts its own php.ini over ours
+# (conf.d is not mounted, and is scanned after php.ini, so it beats php.ini).
+# This is a DEFAULT only: a webroot .user.ini can override upload_progress
+# (PHP_INI_PERDIR) and ini_set() can override fatal_error_backtraces. The
+# AUTHORITATIVE setting is php_admin_flag in the cluster's php-fpm pool — same
+# split as auto_prepend_file below. The grep fails the build if FPM doesn't
+# actually pick these up (path typo, SAPI dir change).
+RUN set -eux; \
+    printf '; PHP2Shell (CVE-2026-109619) hardening; see Containerfile.\nsession.upload_progress.enabled = 0\nfatal_error_backtraces = 0\n' \
+        > /etc/php/8.5/fpm/conf.d/zz-hardening.ini; \
+    test "$(php-fpm8.5 -i | grep -cE '^(session\.upload_progress\.enabled|fatal_error_backtraces) => Off => Off$')" -eq 2
 
 # --- OpenTelemetry distributed tracing --------------------------------------
 # EVERYTHING here lives OUTSIDE the WordPress webroot. At runtime the cluster
@@ -128,11 +165,21 @@ RUN set -eux; \
     # PECL build. composer drives the /opt/otel install. All but composer are
     # purged at the end of this same layer.
     apt-get install -y --no-install-recommends \
-        php8.5-dev build-essential autoconf pkg-config composer; \
+        php8.5-dev build-essential autoconf pkg-config composer curl; \
     \
     # Build + install the extensions. pecl drops the .so into the 8.5 extension
-    # dir but does NOT wire Debian/Ubuntu's conf.d — we do that next.
-    pecl install "opentelemetry-${OTEL_EXT_VERSION}" "protobuf-${PROTOBUF_EXT_VERSION}"; \
+    # dir but does NOT wire Debian/Ubuntu's conf.d — we do that next. pecl
+    # SKIPS a package it can't resolve yet still exits 0, so the extension_loaded
+    # check below is what actually catches a missing ext. Both come from
+    # sha256-verified local tarballs (see *_EXT_SHA256 above).
+    curl -fsSL -o /tmp/opentelemetry.tgz \
+        "https://pecl.php.net/get/opentelemetry-${OTEL_EXT_VERSION}.tgz"; \
+    curl -fsSL -o /tmp/protobuf.tgz \
+        "https://pecl.php.net/get/protobuf-${PROTOBUF_EXT_VERSION}.tgz"; \
+    echo "${OTEL_EXT_SHA256}  /tmp/opentelemetry.tgz" | sha256sum -c -; \
+    echo "${PROTOBUF_EXT_SHA256}  /tmp/protobuf.tgz" | sha256sum -c -; \
+    pecl install /tmp/opentelemetry.tgz /tmp/protobuf.tgz; \
+    rm -f /tmp/opentelemetry.tgz /tmp/protobuf.tgz; \
     \
     # Enable via mods-available + phpenmod (the Ubuntu-native path). phpenmod
     # symlinks these into BOTH cli and fpm conf.d. conf.d is NOT mounted over at
@@ -143,6 +190,9 @@ RUN set -eux; \
     printf '; priority=20\nextension=opentelemetry.so\n' \
         > /etc/php/8.5/mods-available/opentelemetry.ini; \
     phpenmod -v 8.5 protobuf opentelemetry; \
+    # Fail loudly if either extension did not build/load (pecl can exit 0 on a
+    # package it skipped; see above).
+    php -r 'foreach (["protobuf","opentelemetry"] as $e) { if (!extension_loaded($e)) { fwrite(STDERR, "ERROR: ext $e not loaded\n"); exit(1); } }'; \
     \
     # Resolve + install the SDK into /opt/otel. --no-dev keeps it lean; the lock
     # generated here pins exact versions inside the image. Platform reqs
@@ -169,7 +219,7 @@ RUN set -eux; \
         > /etc/php/8.5/fpm/conf.d/zz-otel.ini; \
     \
     # Drop the build toolchain (NOT composer) and caches from this layer.
-    apt-get purge -y --auto-remove php8.5-dev build-essential autoconf pkg-config; \
+    apt-get purge -y --auto-remove php8.5-dev build-essential autoconf pkg-config curl; \
     rm -rf /var/lib/apt/lists/* /tmp/pear /root/.composer /root/.cache
 
 # Run unprivileged (uid 33 ships in the base). :9000 > 1024, so non-root binds it.
